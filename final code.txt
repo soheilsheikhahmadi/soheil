@@ -5,7 +5,7 @@ import seaborn as sns
 import numpy as np
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.compose import ColumnTransformer
-from sklearn.model_selection import train_test_split, KFold, GridSearchCV
+from sklearn.model_selection import train_test_split, KFold, GridSearchCV, ParameterGrid
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, explained_variance_score
 from sklearn.linear_model import Ridge, Lasso, ElasticNet
 from sklearn.metrics import make_scorer
@@ -44,6 +44,10 @@ if os.path.isfile(file_path):
 
     X_train, X_test, y_train, y_test = train_test_split(X_processed, y, test_size=0.2, random_state=42)
 
+    # Creating a validation set for early stopping
+    X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.1, random_state=42)
+
+    # Visualization: Energy Consumption by Month and Hour
     plt.figure(figsize=(15, 5))
 
     plt.subplot(1, 2, 1)
@@ -91,7 +95,8 @@ if os.path.isfile(file_path):
 
     correlation_matrix = df.select_dtypes(include=[np.number]).corr()
     plt.figure(figsize=(12, 8))
-    sns.heatmap(correlation_matrix, annot=True, cmap='Blues', center=0, annot_kws={"size": 12, "weight": 'bold', 'color': 'black'})
+    sns.heatmap(correlation_matrix, annot=True, cmap='Blues', center=0,
+                annot_kws={"size": 12, "weight": 'bold', 'color': 'black'})
     plt.title('Correlation Matrix of Numerical Features', fontsize=16, fontweight='bold')
     plt.xticks(fontsize=12, fontweight='bold')
     plt.yticks(fontsize=12, fontweight='bold')
@@ -112,13 +117,14 @@ if os.path.isfile(file_path):
         def get_param_grid(self):
             return {
                 'MLP': {
-                    'model': MLPRegressor(max_iter=1000, random_state=self.random_state),
+                    'model': MLPRegressor(random_state=self.random_state),
                     'params': {
-                        'hidden_layer_sizes': [(50,), (100,), (100, 50)],
-                        'activation': ['relu', 'tanh'],
+                        'hidden_layer_sizes': [(300, 150), (150, 100), (200, 150, 100)],
+                        'activation': ['relu'],
                         'solver': ['adam'],
-                        'alpha': [0.0001, 0.001, 0.01],
+                        'alpha': [0.0001, 0.001, 0.005, 0.01],
                         'learning_rate': ['constant', 'adaptive'],
+                        'max_iter': [2000, 2500],
                     }
                 },
                 'Ridge': {
@@ -144,40 +150,62 @@ if os.path.isfile(file_path):
                 'XGBoost': {
                     'model': XGBRegressor(random_state=self.random_state),
                     'params': {
-                        'n_estimators': [100, 200],
-                        'max_depth': [3, 5],
-                        'learning_rate': [0.01, 0.1],
-                        'subsample': [0.8, 1.0],
-                        'colsample_bytree': [0.8, 1.0]
+                        'n_estimators': [2000, 2500],
+                        'max_depth': [10, 12, 15],
+                        'learning_rate': [0.01, 0.02, 0.05],
+                        'subsample': [0.8, 0.85, 0.9],
+                        'colsample_bytree': [0.8, 0.85, 0.9],
                     }
                 }
             }
 
-        def train_and_evaluate(self, X, y):
+        def train_and_evaluate(self, X, y, X_val, y_val):
             param_grids = self.get_param_grid()
             best_models = {}
 
             for name, config in param_grids.items():
-                grid_search = GridSearchCV(
-                    config['model'],
-                    config['params'],
-                    cv=self.cv,
-                    scoring=self.scoring,
-                    refit='r2',
-                    n_jobs=-1,
-                    verbose=1
-                )
-                grid_search.fit(X, y)
-                best_models[name] = {
-                    'best_params': grid_search.best_params_,
-                    'best_score': grid_search.best_score_,
-                    'best_model': grid_search.best_estimator_
-                }
+                if name == 'XGBoost':
+                    best_score = float('-inf')
+                    best_model = None
+                    best_params = None
+                    for params in ParameterGrid(config['params']):
+                        model = XGBRegressor(**params, random_state=self.random_state)
+                        model.fit(
+                            X, y,
+                            eval_set=[(X_val, y_val)],
+                            verbose=False
+                        )
+                        score = r2_score(y_val, model.predict(X_val))
+                        if score > best_score:
+                            best_score = score
+                            best_model = model
+                            best_params = params
+                    best_models[name] = {
+                        'best_params': best_params,
+                        'best_score': best_score,
+                        'best_model': best_model,
+                    }
+                else:
+                    grid_search = GridSearchCV(
+                        config['model'],
+                        config['params'],
+                        cv=self.cv,
+                        scoring=self.scoring,
+                        refit='r2',
+                        n_jobs=-1,
+                        verbose=1
+                    )
+                    grid_search.fit(X, y)
+                    best_models[name] = {
+                        'best_params': grid_search.best_params_,
+                        'best_score': grid_search.best_score_,
+                        'best_model': grid_search.best_estimator_
+                    }
 
             return best_models
 
     trainer = ModelTrainer()
-    best_models = trainer.train_and_evaluate(X_train, y_train)
+    best_models = trainer.train_and_evaluate(X_train, y_train, X_val, y_val)
 
     class ModelEvaluator:
         def evaluate_model(self, model, X, y):
